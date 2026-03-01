@@ -399,6 +399,26 @@
     .nav-links { display: none; }
     .etf-grid { grid-template-columns: 1fr; }
   }
+
+  html { scroll-behavior: smooth; }
+  .status-bar {
+    display: flex; justify-content: center; padding: 0.75rem 0 0;
+  }
+  .status-bar span { font-size: 0.72rem; color: var(--text-muted); }
+  .status-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green); margin-right: 5px; vertical-align: middle;
+  }
+  .status-dot.error { background: var(--red); }
+  .status-dot.loading { animation: statusPulse 1s infinite; background: var(--copper-400); }
+  @keyframes statusPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .news-title a { color: var(--text-primary); text-decoration: none; transition: color 0.2s; }
+  .news-title a:hover { color: var(--copper-400); }
+  .etf-price-row { display: flex; gap: 0.75rem; align-items: baseline; margin-bottom: 0.5rem; }
+  .etf-live-price { font-size: 1.1rem; font-weight: 700; }
+  .etf-live-change { font-size: 0.8rem; font-weight: 600; }
+  .filing-link { color: var(--text-primary); text-decoration: none; transition: color 0.2s; }
+  .filing-link:hover { color: var(--copper-400); }
 </style>
 </head>
 <body>
@@ -425,6 +445,9 @@
 <div class="hero">
   <h1>Redmetal Analytics Dashboard</h1>
   <p>Real-time tracking of copper prices, mining stocks, and market catalysts</p>
+  <div class="status-bar">
+    <span><span class="status-dot loading" id="status-dot"></span> <span id="status-text">Connecting to market data...</span></span>
+  </div>
 </div>
 
 <!-- ═══ TAB BAR ═══ -->
@@ -439,7 +462,7 @@
   <div class="dashboard-grid">
 
     <!-- ── Spot Price Chart ── -->
-    <div class="card full-width">
+    <div class="card full-width" id="spot-section">
       <div class="card-header">
         <div class="card-title">Cu Spot Price History</div>
         <span class="card-badge badge-green">LIVE</span>
@@ -464,7 +487,7 @@
     </div>
 
     <!-- ── Copper Miners ── -->
-    <div class="card">
+    <div class="card" id="miners-section">
       <div class="card-header">
         <div class="card-title">Copper Miners</div>
         <span class="card-badge badge-blue">TOP MOVERS</span>
@@ -520,7 +543,7 @@
     </div>
 
     <!-- ── Copper Futures ── -->
-    <div class="card">
+    <div class="card" id="futures-section">
       <div class="card-header">
         <div class="card-title">Copper Futures (COMEX HG)</div>
       </div>
@@ -573,7 +596,7 @@
     </div>
 
     <!-- ── SEC Filings ── -->
-    <div class="card">
+    <div class="card" id="filings-section">
       <div class="card-header">
         <div class="card-title">SEC Filings</div>
       </div>
@@ -602,7 +625,7 @@
     </div>
 
     <!-- ── Copper News ── -->
-    <div class="card">
+    <div class="card" id="news-section">
       <div class="card-header">
         <div class="card-title">Copper News Feed</div>
         <span class="card-badge badge-green">LATEST</span>
@@ -781,151 +804,255 @@
 </footer>
 
 <script>
-  // ─── Spot Price Chart ───
-  const spotCtx = document.getElementById('spotChart').getContext('2d');
-  
-  // Generate 90 days of simulated copper price data (3M view)
-  const spotLabels = [];
-  const spotData = [];
-  let price = 5.20;
-  const today = new Date();
-  for (let i = 90; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    spotLabels.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
-    price += (Math.random() - 0.42) * 0.08;
-    price = Math.max(4.8, Math.min(6.2, price));
-    spotData.push(parseFloat(price.toFixed(3)));
+(async () => {
+  'use strict';
+  // ─── Config ───
+  const PROXIES = [
+    url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    url => 'https://corsproxy.io/?' + encodeURIComponent(url),
+  ];
+  const YF = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+  const MINERS = ['FCX','SCCO','TECK','BHP','RIO','HBM','ERO','TGB'];
+  const ETF_SYMS = ['COPX','CPER','ICOP','JCPB'];
+  const FUTURES_CFG = [
+    {s:'HGH26.CMX',l:"HG Mar '26"},{s:'HGK26.CMX',l:"HG May '26"},
+    {s:'HGN26.CMX',l:"HG Jul '26"},{s:'HGU26.CMX',l:"HG Sep '26"},
+    {s:'HGZ26.CMX',l:"HG Dec '26"},{s:'HGH27.CMX',l:"HG Mar '27"}
+  ];
+  const RANGES = {
+    '1W':['5d','15m'],'1M':['1mo','30m'],'3M':['3mo','1d'],
+    '6M':['6mo','1d'],'1Y':['1y','1wk'],'5Y':['5y','1mo'],'ALL':['max','1mo']
+  };
+  let spotChart, futChart, curRange = '3M';
+  const $ = s => document.querySelector(s);
+  const $$ = s => document.querySelectorAll(s);
+
+  // ─── Fetch with CORS proxy fallback ───
+  async function pfetch(url) {
+    for (const proxy of PROXIES) {
+      try {
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 10000);
+        const r = await fetch(proxy(url), { signal: c.signal });
+        clearTimeout(t);
+        if (r.ok) return r;
+      } catch(e) { continue; }
+    }
+    throw new Error('Fetch failed');
   }
-  // Ensure last price matches displayed
-  spotData[spotData.length - 1] = 6.03;
+  async function yfChart(sym, range='1d', interval='1d') {
+    const url = YF + encodeURIComponent(sym) + '?range=' + range + '&interval=' + interval;
+    const r = await pfetch(url);
+    let d; try { d = await r.json(); } catch(e) { throw new Error('Bad JSON'); }
+    if (!d.chart?.result?.[0]) throw new Error('No data');
+    return d.chart.result[0];
+  }
+  async function getQuote(sym) {
+    const r = await yfChart(sym);
+    const m = r.meta, price = m.regularMarketPrice;
+    const prev = m.chartPreviousClose || m.previousClose || price;
+    return { price, change: prev ? ((price - prev) / prev * 100) : 0 };
+  }
 
-  const gradient = spotCtx.createLinearGradient(0, 0, 0, 300);
-  gradient.addColorStop(0, 'rgba(200,117,51,0.25)');
-  gradient.addColorStop(1, 'rgba(200,117,51,0)');
+  // ─── Helpers ───
+  const fmtP = (p, d=2) => '$' + p.toFixed(d);
+  const fmtC = c => (c >= 0 ? '+' : '') + c.toFixed(2) + '%';
+  function esc(s) { const el = document.createElement('div'); el.textContent = s; return el.innerHTML; }
+  function timeAgo(d) {
+    const s = Math.floor((Date.now() - d) / 1000);
+    if (s < 60) return 'now'; if (s < 3600) return Math.floor(s/60) + 'm';
+    if (s < 86400) return Math.floor(s/3600) + 'h'; return Math.floor(s/86400) + 'd';
+  }
+  function setStatus(text, ok) {
+    const dot = $('#status-dot'), txt = $('#status-text');
+    if (dot) dot.className = 'status-dot' + (ok === false ? ' error' : ok === null ? ' loading' : '');
+    if (txt) txt.textContent = text;
+  }
 
-  new Chart(spotCtx, {
-    type: 'line',
-    data: {
-      labels: spotLabels,
-      datasets: [{
-        data: spotData,
-        borderColor: '#c87533',
-        borderWidth: 2,
-        backgroundColor: gradient,
-        fill: true,
-        tension: 0.3,
-        pointRadius: 0,
-        pointHitRadius: 10,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1e1814',
-          borderColor: '#3d2e22',
-          borderWidth: 1,
-          titleColor: '#b8a99a',
-          bodyColor: '#f5ebe4',
-          bodyFont: { weight: '600' },
-          padding: 10,
-          cornerRadius: 8,
-          callbacks: {
-            label: ctx => `$${ctx.parsed.y.toFixed(3)} /lb`
-          }
-        }
-      },
-      scales: {
-        x: {
-          grid: { color: 'rgba(61,46,34,0.2)' },
-          ticks: { color: '#7a6d62', font: { size: 10 }, maxTicksLimit: 8 }
-        },
-        y: {
-          grid: { color: 'rgba(61,46,34,0.2)' },
-          ticks: {
-            color: '#7a6d62', font: { size: 10 },
-            callback: v => '$' + v.toFixed(2)
-          }
-        }
-      },
-      interaction: { intersect: false, mode: 'index' }
-    }
-  });
+  // ─── Initial simulated data for instant display ───
+  const initLabels = [], initPrices = [];
+  let ip = 5.20;
+  for (let i = 90; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    initLabels.push(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+    ip += (Math.random() - 0.42) * 0.08;
+    ip = Math.max(4.8, Math.min(6.2, ip)); initPrices.push(+ip.toFixed(3));
+  }
+  initPrices[initPrices.length - 1] = 6.03;
 
-  // ─── Futures Chart ───
-  const futCtx = document.getElementById('futuresChart').getContext('2d');
-  const futGrad = futCtx.createLinearGradient(0, 0, 0, 180);
-  futGrad.addColorStop(0, 'rgba(96,165,250,0.15)');
-  futGrad.addColorStop(1, 'rgba(96,165,250,0)');
+  // ─── Chart Setup ───
+  const tip = {backgroundColor:'#1e1814',borderColor:'#3d2e22',borderWidth:1,titleColor:'#b8a99a',bodyColor:'#f5ebe4',bodyFont:{weight:'600'},padding:10,cornerRadius:8,callbacks:{label:c=>'$'+c.parsed.y.toFixed(3)+' /lb'}};
+  const xAx = {grid:{color:'rgba(61,46,34,0.2)'},ticks:{color:'#7a6d62',font:{size:10},maxTicksLimit:8}};
+  const yAx = {grid:{color:'rgba(61,46,34,0.2)'},ticks:{color:'#7a6d62',font:{size:10},callback:v=>'$'+v.toFixed(2)}};
 
-  new Chart(futCtx, {
-    type: 'line',
-    data: {
-      labels: ["Mar '26", "May '26", "Jul '26", "Sep '26", "Dec '26", "Mar '27"],
-      datasets: [{
-        data: [6.029, 6.072, 6.118, 6.165, 6.234, 6.298],
-        borderColor: '#60a5fa',
-        borderWidth: 2,
-        backgroundColor: futGrad,
-        fill: true,
-        tension: 0.3,
-        pointRadius: 4,
-        pointBackgroundColor: '#60a5fa',
-        pointBorderColor: '#1e1814',
-        pointBorderWidth: 2,
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1e1814',
-          borderColor: '#3d2e22',
-          borderWidth: 1,
-          titleColor: '#b8a99a',
-          bodyColor: '#f5ebe4',
-          bodyFont: { weight: '600' },
-          padding: 10,
-          cornerRadius: 8,
-          callbacks: {
-            label: ctx => `$${ctx.parsed.y.toFixed(3)} /lb`
-          }
-        }
-      },
-      scales: {
-        x: {
-          grid: { color: 'rgba(61,46,34,0.2)' },
-          ticks: { color: '#7a6d62', font: { size: 10 } }
-        },
-        y: {
-          grid: { color: 'rgba(61,46,34,0.2)' },
-          ticks: {
-            color: '#7a6d62', font: { size: 10 },
-            callback: v => '$' + v.toFixed(2)
-          }
-        }
-      }
-    }
-  });
-
-  // ─── Tab Toggle (visual only) ───
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+  function initCharts() {
+    const sCtx = document.getElementById('spotChart').getContext('2d');
+    const sg = sCtx.createLinearGradient(0,0,0,300);
+    sg.addColorStop(0,'rgba(200,117,51,0.25)'); sg.addColorStop(1,'rgba(200,117,51,0)');
+    spotChart = new Chart(sCtx, {
+      type:'line',
+      data:{labels:initLabels,datasets:[{data:initPrices,borderColor:'#c87533',borderWidth:2,backgroundColor:sg,fill:true,tension:0.3,pointRadius:0,pointHitRadius:10}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:tip},scales:{x:xAx,y:yAx},interaction:{intersect:false,mode:'index'}}
     });
-  });
-  document.querySelectorAll('.time-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
+    const fCtx = document.getElementById('futuresChart').getContext('2d');
+    const fg = fCtx.createLinearGradient(0,0,0,180);
+    fg.addColorStop(0,'rgba(96,165,250,0.15)'); fg.addColorStop(1,'rgba(96,165,250,0)');
+    futChart = new Chart(fCtx, {
+      type:'line',
+      data:{labels:["Mar '26","May '26","Jul '26","Sep '26","Dec '26","Mar '27"],datasets:[{data:[6.029,6.072,6.118,6.165,6.234,6.298],borderColor:'#60a5fa',borderWidth:2,backgroundColor:fg,fill:true,tension:0.3,pointRadius:4,pointBackgroundColor:'#60a5fa',pointBorderColor:'#1e1814',pointBorderWidth:2}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:tip},scales:{x:{grid:{color:'rgba(61,46,34,0.2)'},ticks:{color:'#7a6d62',font:{size:10}}},y:yAx}}
     });
-  });
+  }
+
+  // ─── Live Data Updates ───
+  async function updateSpot() {
+    const q = await getQuote('HG=F');
+    $('.spot-price').textContent = fmtP(q.price, 3);
+    const el = $('.spot-change');
+    el.textContent = fmtC(q.change);
+    el.className = 'spot-change ' + (q.change >= 0 ? 'positive' : 'negative');
+    el.style.background = q.change >= 0 ? 'var(--green-bg)' : 'var(--red-bg)';
+  }
+
+  async function updateChart(range) {
+    curRange = range || curRange;
+    const [r, iv] = RANGES[curRange];
+    const res = await yfChart('HG=F', r, iv);
+    const ts = res.timestamp || [], cl = res.indicators.quote[0].close || [];
+    const pts = [];
+    for (let i = 0; i < ts.length; i++) if (cl[i] != null) pts.push({t:ts[i],c:cl[i]});
+    spotChart.data.labels = pts.map(p => {
+      const d = new Date(p.t * 1000);
+      if (curRange === '1W') return d.toLocaleDateString('en-US',{weekday:'short',hour:'numeric'});
+      if (['5Y','ALL'].includes(curRange)) return d.toLocaleDateString('en-US',{year:'2-digit',month:'short'});
+      return d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    });
+    spotChart.data.datasets[0].data = pts.map(p => p.c);
+    spotChart.update('none');
+  }
+
+  async function updateMiners() {
+    const results = await Promise.allSettled(MINERS.map(s => getQuote(s)));
+    const rows = $$('.miners-table tbody tr');
+    results.forEach((r, i) => {
+      if (r.status !== 'fulfilled' || !rows[i]) return;
+      const {price, change} = r.value;
+      rows[i].querySelector('.price-col').textContent = fmtP(price);
+      const cc = rows[i].querySelector('.change-col');
+      cc.textContent = fmtC(change); cc.className = 'change-col ' + (change >= 0 ? 'positive' : 'negative');
+    });
+  }
+
+  async function updateFutures() {
+    const results = await Promise.allSettled(FUTURES_CFG.map(f =>
+      yfChart(f.s).then(r => ({l:f.l,price:r.meta.regularMarketPrice,prev:r.meta.chartPreviousClose||r.meta.previousClose,vol:r.meta.regularMarketVolume||0}))
+    ));
+    const tbody = $('.futures-table tbody'), labels = [], prices = [];
+    let html = '';
+    results.forEach((r, i) => {
+      if (r.status !== 'fulfilled') return;
+      const d = r.value, chg = d.price - (d.prev || d.price);
+      labels.push(FUTURES_CFG[i].l.replace('HG ','')); prices.push(d.price);
+      html += '<tr><td style="font-weight:600">'+esc(d.l)+'</td><td class="price-col">'+fmtP(d.price,3)+'</td><td class="change-col '+(chg>=0?'positive':'negative')+'">'+(chg>=0?'+':'')+chg.toFixed(3)+'</td><td class="price-col" style="color:var(--text-muted)">'+(d.vol>0?d.vol.toLocaleString():'\u2014')+'</td></tr>';
+    });
+    if (html) tbody.innerHTML = html;
+    if (prices.length) { futChart.data.labels = labels; futChart.data.datasets[0].data = prices; futChart.update('none'); }
+  }
+
+  async function updateETFs() {
+    const results = await Promise.allSettled(ETF_SYMS.map(s => getQuote(s)));
+    const cards = $$('.etf-card');
+    results.forEach((r, i) => {
+      if (r.status !== 'fulfilled' || !cards[i]) return;
+      const {price, change} = r.value;
+      let pr = cards[i].querySelector('.etf-price-row');
+      if (!pr) { pr = document.createElement('div'); pr.className = 'etf-price-row'; cards[i].querySelector('.etf-name')?.after(pr); }
+      pr.innerHTML = '<span class="etf-live-price">'+fmtP(price)+'</span><span class="etf-live-change '+(change>=0?'positive':'negative')+'">'+fmtC(change)+'</span>';
+    });
+  }
+
+  async function updateNews() {
+    const url = 'https://news.google.com/rss/search?q=copper+mining+market+price&hl=en-US&gl=US&ceid=US:en';
+    const r = await pfetch(url);
+    const xml = await r.text();
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    const items = doc.querySelectorAll('item');
+    if (!items.length) return;
+    const list = $('#news-section .news-list'); if (!list) return;
+    let html = '';
+    for (let i = 0; i < Math.min(items.length, 6); i++) {
+      let title = items[i].querySelector('title')?.textContent || '';
+      const src = items[i].querySelector('source')?.textContent || '';
+      const pub = items[i].querySelector('pubDate')?.textContent;
+      const link = items[i].querySelector('link')?.textContent?.trim() || '#';
+      if (src && title.endsWith(' - ' + src)) title = title.slice(0, -(src.length + 3));
+      const ago = pub ? timeAgo(new Date(pub)) : '';
+      html += '<div class="news-item"><div class="news-title"><a href="'+esc(link)+'" target="_blank" rel="noopener">'+esc(title)+'</a></div><div class="news-source">'+esc(src)+(ago?' \u00b7 '+ago:'')+'</div></div>';
+    }
+    if (html) list.innerHTML = html;
+  }
+
+  async function updateFilings() {
+    const url = 'https://efts.sec.gov/LATEST/search-index?q=%22copper%22&dateRange=custom&startdt=2025-06-01&forms=10-K%2C10-Q%2C20-F%2C8-K';
+    const r = await pfetch(url);
+    let data; try { data = await r.json(); } catch(e) { return; }
+    const hits = (data.hits?.hits || []).slice(0, 5);
+    if (!hits.length) return;
+    const list = $('#filings-section .news-list'); if (!list) return;
+    let html = '';
+    hits.forEach(h => {
+      const s = h._source || {};
+      const name = s.display_names?.join(', ') || s.entity_name || 'Filing';
+      const form = s.form_type || ''; const date = s.file_date || '';
+      html += '<div class="news-item"><div class="news-title"><a class="filing-link" href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company='+encodeURIComponent(name)+'&type='+encodeURIComponent(form)+'&owner=include&count=10" target="_blank" rel="noopener">'+esc(name)+' ('+esc(form)+')</a></div><div class="news-source">'+esc(date)+'</div></div>';
+    });
+    if (html) list.innerHTML = html;
+  }
+
+  // ─── Navigation & UI ───
+  function setupNav() {
+    const map = {'Dashboard':null,'Spot Price':'spot-section','Futures':'futures-section','Miners':'miners-section','SEC Filings':'filings-section','News':'news-section'};
+    $$('.nav-links a').forEach(a => {
+      const t = a.textContent.trim();
+      if (t in map) a.addEventListener('click', e => {
+        e.preventDefault(); $$('.nav-links a').forEach(l => l.classList.remove('active')); a.classList.add('active');
+        if (!map[t]) window.scrollTo({top:0,behavior:'smooth'});
+        else document.getElementById(map[t])?.scrollIntoView({behavior:'smooth',block:'start'});
+      });
+    });
+  }
+  function setupTabs() {
+    const map = {'Stocks':'miners-section','Spot':'spot-section','Futures':'futures-section'};
+    $$('.tab-btn').forEach(btn => btn.addEventListener('click', () => {
+      $$('.tab-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active');
+      const id = map[btn.textContent.trim()];
+      if (id) document.getElementById(id)?.scrollIntoView({behavior:'smooth',block:'start'});
+    }));
+  }
+  function setupTimeRange() {
+    $$('.time-btn').forEach(btn => btn.addEventListener('click', async () => {
+      $$('.time-btn').forEach(b => b.classList.remove('active')); btn.classList.add('active');
+      try { await updateChart(btn.textContent.trim()); } catch(e) { console.warn('Chart:', e); }
+    }));
+  }
+
+  // ─── Main ───
+  async function updateAll() {
+    setStatus('Fetching live market data...', null);
+    const results = await Promise.allSettled([
+      updateSpot(), updateChart(), updateMiners(),
+      updateFutures(), updateETFs(), updateNews(), updateFilings()
+    ]);
+    const fail = results.filter(r => r.status === 'rejected').length;
+    if (fail === results.length) setStatus('Unable to connect \u2014 showing demo data', false);
+    else if (fail > 0) setStatus('Updated ' + new Date().toLocaleTimeString() + ' (' + (results.length-fail) + '/' + results.length + ' sources)', true);
+    else setStatus('Live \u00b7 Updated ' + new Date().toLocaleTimeString(), true);
+  }
+
+  initCharts(); setupNav(); setupTabs(); setupTimeRange();
+  await updateAll();
+  setInterval(updateAll, 60000);
+})();
 </script>
 
 </body>
